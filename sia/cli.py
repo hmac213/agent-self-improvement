@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import config as config_mod
-from . import report
+from . import report, trajectories
 from .config import REPO_ROOT
 from .supervisor import Supervisor
 
@@ -84,6 +84,41 @@ def cmd_compare(args) -> None:
     print(report.compare([Path(d) for d in args.run_dirs]))
 
 
+def cmd_db(args) -> None:
+    """Inspect the trajectory database: list runs, show one run, or run SQL."""
+    target = Path(args.target)
+    path = trajectories.resolve_db_path(target)
+    if not args.run and target.is_dir() and (target / "config.json").exists():
+        args.run = target.name  # a run directory
+    if not path.exists():
+        sys.exit(f"no trajectory database at {path}")
+    with trajectories.TrajectoryDB(path, readonly=True) as db:
+        if args.sql:
+            rows = db.query(args.sql)
+        elif args.run:
+            what = args.show
+            rows = {"tasks": db.tasks, "generations": db.generations, "llm_calls": db.llm_calls,
+                    "tool_calls": db.tool_calls, "events": db.events}[what](args.run)
+        else:
+            rows = db.runs()
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        print("(no rows)")
+        return
+    cols = list(rows[0])
+    print("\t".join(cols))
+    for r in rows:
+        print("\t".join("" if r.get(c) is None else _cell(r[c]) for c in cols))
+
+
+def _cell(v) -> str:
+    text = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+    text = text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    return text if len(text) <= 200 else text[:197] + "..."
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="sia", description="Self-improvement arena for coding agents")
     sub = p.add_subparsers(required=True)
@@ -112,6 +147,15 @@ def main(argv: list[str] | None = None) -> None:
     c = sub.add_parser("compare", help="one row per run")
     c.add_argument("run_dirs", nargs="+")
     c.set_defaults(fn=cmd_compare)
+
+    d = sub.add_parser("db", help="query the trajectory database")
+    d.add_argument("target", nargs="?", default=str(REPO_ROOT / "runs"),
+                   help="a trajectories.db file, a runs directory containing one, or a run directory")
+    d.add_argument("--run", help="show one run's rows instead of listing runs")
+    d.add_argument("--show", default="tasks", choices=["tasks", "generations", "llm_calls", "tool_calls", "events"])
+    d.add_argument("--sql", help="run a read-only SQL query")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(fn=cmd_db)
 
     args = p.parse_args(argv)
     args.fn(args)

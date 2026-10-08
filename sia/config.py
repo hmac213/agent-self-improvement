@@ -20,6 +20,9 @@ class ExperimentCfg:
     affordance: int = 0
     system_prompt: str | None = None  # overrides the rendered prompt entirely
     replicates: int = 1
+    # SQLite trajectory store (see trajectories.py). None = <runs root>/trajectories.db;
+    # a relative path is resolved against the runs root.
+    trajectory_db: str | None = None
 
 
 @dataclass
