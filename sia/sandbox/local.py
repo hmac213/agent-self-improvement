@@ -1,8 +1,9 @@
 """Runs the harness as a plain host process under the run directory.
 
 NOT isolated: the agent has the same access as the user running the
-supervisor. Use it for development and mock runs; use docker or daytona for
-real experiments.
+supervisor, can read the task suites' hidden tests on disk, and has the
+host's network. The supervisor therefore only runs the mock model here unless
+`sandbox.allow_unisolated` is set; use docker or daytona for real experiments.
 """
 
 from __future__ import annotations

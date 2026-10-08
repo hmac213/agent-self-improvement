@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = []  # model providers are called over HTTP with the standard library
 
 [project.optional-dependencies]
-daytona = ["daytona"]
+daytona = ["daytona>=0.223"]  # os_user, domain_allow_list, Image.from_dockerfile
 dev = ["pytest"]
 
 [project.scripts]

@@ -53,9 +53,13 @@ class SandboxCfg:
     proxy_public_url: str | None = None
     proxy_port: int = 0  # 0 = pick a free port; pin it when tunnelling to a remote sandbox
     daytona_network_allow_list: str | None = None
-    # docker: "proxy_only" = internal network that reaches only the LLM proxy;
-    # "open" = default bridge (internet and host services reachable).
+    # docker / daytona: "proxy_only" = the sandbox reaches only the LLM proxy;
+    # "open" = docker's default bridge (internet and host) / daytona with only
+    # daytona_network_allow_list applied.
     network: str = "proxy_only"
+    # The local sandbox can't be isolated (the harness is a host process with
+    # your permissions), so it only runs the mock model unless this is set.
+    allow_unisolated: bool = False
     keep: bool = False  # leave the sandbox running after the run (docker/daytona)
 
 

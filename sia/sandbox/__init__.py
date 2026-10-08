@@ -19,7 +19,8 @@ def make_sandbox(cfg: SandboxCfg, run_dir: Path, run_id: str, proxy_port: int | 
     if cfg.kind == "daytona":
         from .daytona import DaytonaSandbox
 
-        return DaytonaSandbox(cfg.image, cfg.proxy_public_url, cfg.daytona_network_allow_list, labels={"run": run_id})
+        return DaytonaSandbox(cfg.image, cfg.proxy_public_url, cfg.daytona_network_allow_list, labels={"run": run_id},
+                              network=cfg.network)
     raise ValueError(f"unknown sandbox kind {cfg.kind!r}")
 
 
