@@ -2,6 +2,10 @@
 
 The harness is mutable, so anything it reports about itself is untrustworthy.
 Every model call goes through this proxy instead, which:
+  * serves one provider-neutral endpoint, POST /v1/generate (protocol in
+    providers/base.py), and translates it for the run's provider (Anthropic,
+    OpenAI, Gemini); POST /v1/messages is also passed through verbatim when
+    the provider is Anthropic,
   * authenticates the sandbox with a per-run token (the real API key never
     enters the sandbox),
   * enforces the run's call and cost budget,
@@ -23,6 +27,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from .providers import ProviderError, error_body, make_provider
+
+GENERATE_PATH = "/v1/generate"
+ANTHROPIC_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 # USD per million tokens: (input, output). Cache reads at 10% of input, writes at 125%.
 PRICES = {
     "claude-fable-5-1": (10.0, 50.0),
@@ -32,8 +40,8 @@ PRICES = {
 }
 
 
-def cost_usd(model: str, usage: dict) -> float:
-    pin, pout = PRICES.get(model, (10.0, 50.0))  # unknown models priced conservatively
+def cost_usd(model: str, usage: dict, prices: tuple[float, float] | None = None) -> float:
+    pin, pout = prices or PRICES.get(model, (10.0, 50.0))  # unknown models priced conservatively
     return (
         usage.get("input_tokens", 0) * pin
         + usage.get("cache_read_input_tokens", 0) * pin * 0.1
@@ -64,17 +72,21 @@ class LLMProxy:
         self,
         log_path: Path,
         budget: Budget,
-        upstream_url: str = "https://api.anthropic.com",
+        provider: str = "anthropic",
+        upstream_url: str | None = None,
         api_key: str | None = None,
         mock: Callable[[dict], dict] | None = None,
         force_model: str | None = None,
         host: str = "0.0.0.0",
         port: int = 0,
+        prices: tuple[float, float] | None = None,
     ):
         self.log_path = log_path
         self.budget = budget
-        self.upstream_url = upstream_url.rstrip("/")
+        self.provider = make_provider(provider, api_key, upstream_url)
+        self.upstream_url = self.provider.base_url
         self.api_key = api_key
+        self.prices = prices
         self.mock = mock
         self.force_model = force_model
         self.token = "sia-" + secrets.token_urlsafe(24)
@@ -141,7 +153,7 @@ class LLMProxy:
                 self._send_json(status, {"type": "error", "error": {"type": etype, "message": message}})
 
             def do_GET(self):
-                self._error(404, "not_found_error", "only POST /v1/messages is proxied")
+                self._error(404, "not_found_error", f"only POST {GENERATE_PATH} is proxied")
 
             def do_POST(self):
                 length = int(self.headers.get("content-length", 0))
@@ -150,8 +162,9 @@ class LLMProxy:
                 if key != proxy.token:
                     return self._error(401, "authentication_error", "invalid token")
                 path = self.path.split("?")[0]
-                if path not in ("/v1/messages", "/v1/messages/count_tokens"):
-                    return self._error(404, "not_found_error", f"{path} is not proxied")
+                passthrough = proxy.mock is not None or proxy.provider.name == "anthropic"
+                if path != GENERATE_PATH and not (passthrough and path in ANTHROPIC_PATHS):
+                    return self._error(404, "not_found_error", f"{path} is not proxied; use POST {GENERATE_PATH}")
                 try:
                     body = json.loads(raw)
                 except json.JSONDecodeError:
@@ -176,7 +189,16 @@ class LLMProxy:
             def _forward(self, path: str, body: dict, requested: str | None, count_only: bool = False) -> None:
                 t0 = time.time()
                 record = {"ts": t0, **proxy.context, "path": path, "requested_model": requested, "request": body}
-                if proxy.mock is not None:
+                if path == GENERATE_PATH and proxy.mock is None:
+                    record["provider"] = proxy.provider.name
+                    try:
+                        resp, record["upstream_response"] = proxy.provider.generate(body)
+                        status = 200
+                    except ProviderError as e:
+                        status, resp = e.status, error_body("api_error", e.message)
+                        record["upstream_response"] = e.raw
+                    send = lambda: self._send_json(status, resp)  # noqa: E731
+                elif proxy.mock is not None:
                     try:
                         status, resp = 200, proxy.mock(body)
                     except Exception as e:
@@ -188,7 +210,7 @@ class LLMProxy:
                     # Count and log before replying, so the harness's next request
                     # always sees this one in the budget.
                     usage = (resp or {}).get("usage") or {}
-                    cost = cost_usd(body.get("model", ""), usage)
+                    cost = cost_usd(body.get("model", ""), usage, proxy.prices)
                     with proxy._lock:
                         proxy.stats.calls += 1
                         proxy.stats.errors += status != 200

@@ -24,13 +24,15 @@ experiment measures whether the agent finds that out and uses it.
 │  - rolls back unbootable harnesses │            │ ~/state/checkpoint.json  ← resume point   │
 │  - per-task / per-run limits       │            │ ~/...  anything else the agent keeps      │
 │                                    │            │ /workspace/<task>/  ← one dir per task    │
-│ LLM proxy  (sia/proxy.py)          │◄──HTTP─────┤ harness calls the API via the proxy       │
-│  - per-run token, real key stays   │            │ (ANTHROPIC_BASE_URL, token as API key)    │
-│    on host; budgets; model pinning │            └──────────────────────────────────────────┘
+│ LLM proxy  (sia/proxy.py)          │◄──HTTP─────┤ harness calls POST /v1/generate, one      │
+│  - per-run token, real key stays   │            │ provider-neutral protocol (SIA_LLM_URL,   │
+│    on host; budgets; model pinning │            │ SIA_LLM_TOKEN)                            │
+│  - translates for the provider     │            └──────────────────────────────────────────┘
+│    (sia/providers/)                │
 │  - logs every request/response     │
 └────────────┬───────────────────────┘
              ▼
-     Anthropic API (or the scripted mock in sia/mock_llm.py)
+     Anthropic / OpenAI / Gemini API (or the scripted mock in sia/mock_llm.py)
 ```
 
 **Trust boundary.** Everything the agent can touch is mutable, including its
@@ -62,6 +64,32 @@ output. A bad self-edit costs a little time; it doesn't end the run.
 every step. On boot it reloads the checkpoint, answers any tool call that was
 cut off by the restart, and tells the model it was restarted. The protocol is
 part of the harness, so the agent is free to change it.
+
+**Model providers.** The harness speaks one provider-neutral protocol
+(documented in `seed_harness/llm.py` and `sia/providers/base.py`): messages of
+`text`, `tool_use`, `tool_result` and opaque `reasoning` blocks, tools as JSON
+Schema, and a normalized `stop_reason` and `usage`. The proxy translates it for
+the provider named by `model.upstream`:
+
+| `model.upstream` | API | host key |
+|---|---|---|
+| `anthropic` (default) | Messages API | `ANTHROPIC_API_KEY` |
+| `openai` | Chat Completions; `model.upstream_url` can point at any OpenAI-compatible server (vLLM, Ollama, OpenRouter…) | `OPENAI_API_KEY` |
+| `gemini` | `generateContent` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| `mock` | scripted, no network | none |
+
+Switching providers doesn't touch the harness, so harness snapshots stay
+comparable across models. Provider-specific state that must round-trip
+(Anthropic thinking signatures, Gemini thought signatures) rides along in
+`reasoning` blocks and `provider_meta` and is sent back only to the provider
+that produced it. `model.effort` is passed as-is (Anthropic `effort`, OpenAI
+`reasoning_effort`, Gemini `thinkingLevel`), so set it to a value the model
+accepts, or `null`. Only Claude models have built-in prices; set
+`model.price_per_mtok = [input, output]` for others, or the cost budget charges
+a conservative default. When the provider is Anthropic the proxy also passes
+`/v1/messages` through verbatim, for harnesses that use the Anthropic SDK
+directly. To add a provider, subclass `Provider` in `sia/providers/` and
+register it.
 
 **Mailbox** (`$SIA_ENV_DIR`, see `seed_harness/env.py`): `task.json` (current
 task, or `{"done": true}`), `submit.json` (written by the agent to hand in),
@@ -106,6 +134,9 @@ python -m sia run experiments/mock_smoke.toml --set model.mock_policy=break_harn
 docker build -t sia-sandbox:latest sandbox_image/
 export ANTHROPIC_API_KEY=...                 # stays on the host; the sandbox gets a per-run token
 python -m sia run experiments/affordance_0.toml --replicates 3
+# Other providers: same experiment, different model
+OPENAI_API_KEY=... python -m sia run experiments/affordance_0.toml --set model.upstream=openai --set model.name=<openai-model>
+GEMINI_API_KEY=... python -m sia run experiments/affordance_0.toml --set model.upstream=gemini --set model.name=<gemini-model>
 python -m sia report runs/<run_id>
 python -m sia compare runs/affordance-*
 
@@ -115,7 +146,7 @@ python -m sia run experiments/affordance_0.toml --set model.name=claude-sonnet-5
 # 3. Evolutionary pressure: 4 agents per round, the 2 best final harnesses seed the next round
 python -m sia evolve experiments/affordance_1.toml --rounds 3 --population 4 --survivors 2
 
-pytest                                        # 28 tests: suites, proxy, mock end-to-end (local, Docker, fake Daytona)
+pytest                                        # suites, proxy, providers, mock end-to-end (local, Docker, fake Daytona)
 ```
 
 Each run writes `runs/<run_id>/`:
@@ -164,10 +195,12 @@ backend (Modal, E2B, Firecracker…) is about 50 lines.
 sandboxes: self-modification picked up after a restart, restart via `kill`
 and via the restart tool, rollback of a broken harness, exact per-task
 budgets, inheritance of evolved harnesses, the proxy's forwarding and SSE
-relay against a fake upstream, and the Daytona adapter against a fake SDK.
+relay against a fake upstream, request/response translation for Anthropic, OpenAI
+and Gemini against fake upstreams, and the Daytona adapter against a fake SDK.
 
-**Not yet exercised:** a real model (no API key in the environment where this
-was built) and a real Daytona sandbox. The first real run is the next step.
+**Not yet exercised:** a real model from any provider (no API keys in the
+environment where this was built; the OpenAI and Gemini translations are
+tested only against fake upstreams) and a real Daytona sandbox. The first real run is the next step.
 Start cheap: `--set model.name=claude-sonnet-5-5 --set limits.total_cost_usd=5`.
 
 ## Things to decide or watch before real runs
@@ -180,7 +213,8 @@ Start cheap: `--set model.name=claude-sonnet-5-5 --set limits.total_cost_usd=5`.
 - **Leaks in Docker.** The agent can read `/var/lib/sia` (harness logs, and
   hidden tests while grading runs). Grading in a separate container would
   close that. The container also has open internet access by default.
-- **Local sandbox** inherits the host environment except `ANTHROPIC_API_KEY`.
+- **Local sandbox** inherits the host environment except the provider API
+  keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`).
   Don't run real models there with secrets in your environment.
 - **The "looked" metric** is a substring heuristic. An LLM judge over the
   proxy log would classify behaviors such as "read own source", "edited

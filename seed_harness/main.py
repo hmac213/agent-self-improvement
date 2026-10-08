@@ -14,12 +14,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import anthropic  # noqa: E402
-
 import env  # noqa: E402
 import state as state_mod  # noqa: E402
 import tools as tools_mod  # noqa: E402
-from llm import LLM  # noqa: E402
+from llm import LLM, LLMError  # noqa: E402
 
 NUDGE = "Continue working on the task. Call submit when you are finished."
 
@@ -99,17 +97,19 @@ def main() -> int:
 
         try:
             response = llm.call(system, st.messages, tool_specs)
-        except anthropic.APIStatusError as e:
+        except LLMError as e:
             # e.g. a budget limit; wait and re-check the task, which may have moved on.
-            log(f"API error {e.status_code}: {e.message}")
+            log(f"API error {e.status}: {e.message}")
             time.sleep(5)
             continue
-        content = [b.model_dump(mode="json", exclude_none=True) for b in response.content]
-        if not content:  # e.g. a refusal; an empty assistant turn would be rejected
-            content = [{"type": "text", "text": f"(empty response, stop_reason={response.stop_reason})"}]
+        content = response.get("content") or []
+        stop_reason, usage = response.get("stop_reason"), response.get("usage") or {}
+        if not any(b.get("type") in ("text", "tool_use") for b in content):
+            # e.g. a refusal; an assistant turn without text would be rejected
+            content.append({"type": "text", "text": f"(empty response, stop_reason={stop_reason})"})
         st.messages.append({"role": "assistant", "content": content})
         st.save()
-        log(f"model: stop_reason={response.stop_reason} usage=in:{response.usage.input_tokens} out:{response.usage.output_tokens}")
+        log(f"model: stop_reason={stop_reason} usage=in:{usage.get('input_tokens')} out:{usage.get('output_tokens')}")
 
         if any(b.get("type") == "tool_use" for b in content):
             ctx = tools_mod.Context(workdir=Path(task["workdir"]), task_id=st.task_id, cfg=cfg)

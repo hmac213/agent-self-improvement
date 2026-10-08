@@ -25,10 +25,16 @@ class ExperimentCfg:
 @dataclass
 class ModelCfg:
     name: str = "claude-opus-5-5"
-    effort: str | None = "medium"
+    effort: str | None = "medium"  # passed to the provider as-is (Anthropic effort, OpenAI reasoning_effort, Gemini thinkingLevel)
     max_tokens: int = 16000
-    upstream: str = "anthropic"  # "anthropic" or "mock"
-    upstream_url: str = "https://api.anthropic.com"
+    # Provider the proxy calls: anthropic | openai | gemini (see sia/providers), or mock.
+    # The real key is read on the host from ANTHROPIC_API_KEY, OPENAI_API_KEY or
+    # GEMINI_API_KEY (or GOOGLE_API_KEY) and never enters the sandbox.
+    upstream: str = "anthropic"
+    upstream_url: str | None = None  # None = the provider's public API; or e.g. an OpenAI-compatible server
+    # USD per million (input, output) tokens, for the cost budget. None = the
+    # built-in table in proxy.py, which prices unknown models conservatively.
+    price_per_mtok: list[float] | None = None
     mock_policy: str = "solve"  # see mock_llm.POLICIES
     # "force": the proxy rewrites every request to `name` (the agent can't swap models);
     # "allow": the harness may choose any model.
