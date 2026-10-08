@@ -1,0 +1,5 @@
+name = "pyutils"
+description = """Eight small, similar Python library tasks: implement a module
+in solution.py to a written spec, graded by hidden pytest tests. Similar
+structure across tasks means tooling or notes built on one carry over."""
+order = ["slugify", "roman", "semver", "intervals", "lru", "ini", "wrap", "expr"]

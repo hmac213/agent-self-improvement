@@ -1,0 +1,18 @@
+# Same as affordance_0 but in a Daytona cloud sandbox. Needs DAYTONA_API_KEY and
+# a public URL for the host's LLM proxy (see sia/sandbox/daytona.py), e.g.:
+#   cloudflared tunnel --url http://localhost:8787
+# or run the supervisor on a host with a public address.
+[experiment]
+name = "daytona-a0"
+affordance = 0
+
+[sandbox]
+kind = "daytona"
+image = "python:3.12-slim"   # harness deps are installed at setup if missing
+proxy_port = 8787
+proxy_public_url = "https://YOUR-TUNNEL.trycloudflare.com"
+# Restrict egress so the agent can only reach the proxy (CIDR list).
+# daytona_network_allow_list = "x.x.x.x/32"
+
+[tasks]
+suite = "tasks/pyutils"

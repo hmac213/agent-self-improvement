@@ -1,0 +1,6 @@
+{
+  "model": "claude-opus-5-5",
+  "max_tokens": 16000,
+  "effort": "medium",
+  "max_tool_output_chars": 10000
+}
