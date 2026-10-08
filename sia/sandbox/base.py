@@ -30,6 +30,10 @@ class SandboxPaths:
 class Sandbox(ABC):
     paths: SandboxPaths
     python: str = "python3"
+    # When set, the harness runs as this unprivileged user and owns the agent's
+    # directories, while the supervisor's own commands (exec) keep running as
+    # root and the runtime area is root-only.
+    agent_user: str | None = None
 
     # --- backend primitives -------------------------------------------------
     @abstractmethod
@@ -71,31 +75,60 @@ class Sandbox(ABC):
 
     def make_dirs(self) -> None:
         p = self.paths
-        self.check("mkdir -p " + " ".join(shlex.quote(d) for d in (p.agent_home, p.env_dir, p.workspace, p.runtime)))
+        agent_dirs = " ".join(shlex.quote(d) for d in (p.agent_home, p.env_dir, p.workspace))
+        self.check(f"mkdir -p {agent_dirs} {shlex.quote(p.runtime)}")
+        if self.agent_user:
+            u = shlex.quote(self.agent_user)
+            self.check(f"chown -R {u}:{u} {agent_dirs} && chmod 700 {shlex.quote(p.runtime)}")
+
+    def give_to_agent(self, path: str) -> None:
+        """Make `path` (recursively) owned by the agent user, if there is one."""
+        if self.agent_user:
+            u = shlex.quote(self.agent_user)
+            self.check(f"chown -R {u}:{u} {shlex.quote(path)}")
+
+    def pack_dir(self, remote: str, exclude: tuple[str, ...] = ()) -> bytes | None:
+        """A sandbox directory as a .tar.gz, or None if it doesn't exist."""
+        tmp = f"{self.paths.runtime}/download.tgz"
+        excl = " ".join(f"--exclude={shlex.quote(e)}" for e in exclude)
+        code, _ = self.exec(f"test -d {shlex.quote(remote)} && tar -czf {tmp} {excl} -C {shlex.quote(remote)} .", timeout=300)
+        if code != 0:
+            return None
+        data = self.read_bytes(tmp)
+        self.exec(f"rm -f {tmp}")
+        return data
+
+    def unpack_dir(self, data: bytes, remote: str, replace: bool = False) -> None:
+        """Extract a .tar.gz (from pack_dir or upload_dir) into a sandbox directory.
+        Anything outside the runtime area is handed to the agent user."""
+        tmp = f"{self.paths.runtime}/upload.tgz"
+        self.write_bytes(tmp, data)
+        q = shlex.quote(remote)
+        rm = f"rm -rf {q} && " if replace else ""
+        self.check(f"{rm}mkdir -p {q} && tar -xzf {tmp} -C {q} && rm -f {tmp}")
+        if not remote.startswith(self.paths.runtime + "/"):
+            self.give_to_agent(remote)
 
     def upload_dir(self, local: Path, remote: str, replace: bool = False) -> None:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             tar.add(local, arcname=".")
-        tmp = f"{self.paths.runtime}/upload.tgz"
-        self.write_bytes(tmp, buf.getvalue())
-        q = shlex.quote(remote)
-        rm = f"rm -rf {q} && " if replace else ""
-        self.check(f"{rm}mkdir -p {q} && tar -xzf {tmp} -C {q} && rm -f {tmp}")
+        self.unpack_dir(buf.getvalue(), remote, replace)
 
     def download_dir(self, remote: str, local: Path, exclude: tuple[str, ...] = ()) -> bool:
         """Copy a sandbox directory to the host. Returns False if it doesn't exist."""
-        tmp = f"{self.paths.runtime}/download.tgz"
-        excl = " ".join(f"--exclude={shlex.quote(e)}" for e in exclude)
-        code, _ = self.exec(f"test -d {shlex.quote(remote)} && tar -czf {tmp} {excl} -C {shlex.quote(remote)} .", timeout=300)
-        if code != 0:
+        data = self.pack_dir(remote, exclude)
+        if data is None:
             return False
-        data = self.read_bytes(tmp)
-        self.exec(f"rm -f {tmp}")
         local.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             tar.extractall(local, filter="data")
         return True
+
+    def grading_sandbox(self) -> "Sandbox | None":
+        """A fresh, not yet set up sandbox to grade one submission in, isolated
+        from the agent; None means grade in this sandbox (tasks.grade)."""
+        return None
 
     # --- harness process ------------------------------------------------------
     def start_harness(self, env: dict[str, str], log_path: str) -> None:
@@ -106,9 +139,15 @@ class Sandbox(ABC):
         """
         rt = self.paths.runtime
         envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+        # The wrapper shell keeps the supervisor's identity so it can write the
+        # log and exit code into the runtime area; only the harness drops to the agent user.
+        drop = ""
+        if self.agent_user:
+            u = shlex.quote(self.agent_user)
+            drop = f"setpriv --reuid={u} --regid={u} --init-groups "
         inner = (
             f"cd {shlex.quote(self.paths.agent_home)}; "
-            f"env {envs} sh {shlex.quote(self.paths.harness)}/start.sh > {shlex.quote(log_path)} 2>&1; "
+            f"{drop}env {envs} sh {shlex.quote(self.paths.harness)}/start.sh > {shlex.quote(log_path)} 2>&1; "
             f"echo $? > {rt}/exit_code"
         )
         cmd = (

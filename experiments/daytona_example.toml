@@ -8,10 +8,11 @@ affordance = 0
 
 [sandbox]
 kind = "daytona"
-image = "python:3.12-slim"   # harness deps are installed at setup if missing
+# The default image, "sia-sandbox:latest", is built by Daytona from sandbox_image/Dockerfile.
 proxy_port = 8787
 proxy_public_url = "https://YOUR-TUNNEL.trycloudflare.com"
-# Restrict egress so the agent can only reach the proxy (CIDR list).
+# network = "proxy_only" (the default) allows egress only to the proxy's host:
+# a domain allow-list for a hostname, a /32 for an IP. To set it yourself (CIDR list):
 # daytona_network_allow_list = "x.x.x.x/32"
 
 [tasks]

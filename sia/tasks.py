@@ -8,7 +8,8 @@ A suite is a directory:
     <suite>/<task_id>/tests/    hidden pytest tests, never visible to the agent
     <suite>/<task_id>/reference/ reference solution, host-only (used to validate tests)
 
-Grading copies the agent's working directory to a scratch location, adds the
+Grading copies the agent's working directory to a scratch location (in a fresh
+grading sandbox when the backend provides one), adds the
 hidden tests, runs pytest and counts passing tests from the JUnit report.
 """
 
@@ -73,9 +74,32 @@ def prepare_workdir(sb: Sandbox, task: Task, workdir: str) -> None:
     sb.check(f"mkdir -p {shlex.quote(workdir)}")
     if (task.dir / "starter").is_dir():
         sb.upload_dir(task.dir / "starter", workdir)
+    sb.give_to_agent(workdir)
 
 
 def grade(sb: Sandbox, task: Task, workdir: str, timeout: float = 300) -> Grade:
+    """Grade the contents of `workdir` with the task's hidden tests.
+
+    If the backend offers a grading sandbox (docker), the working directory is
+    copied into a fresh one and the hidden tests only ever exist there, so
+    nothing running in the agent's sandbox can read them. Otherwise grading
+    happens in a scratch directory of the agent's own sandbox."""
+    grader = sb.grading_sandbox()
+    if grader is None:
+        return _grade_in(sb, task, workdir, timeout)
+    files = sb.pack_dir(workdir)
+    grader.setup()
+    try:
+        if files is None:
+            grader.check(f"mkdir -p {shlex.quote(workdir)}")
+        else:
+            grader.unpack_dir(files, workdir)
+        return _grade_in(grader, task, workdir, timeout)
+    finally:
+        grader.teardown()
+
+
+def _grade_in(sb: Sandbox, task: Task, workdir: str, timeout: float) -> Grade:
     scratch = f"{sb.paths.runtime}/grade-{uuid.uuid4().hex[:8]}"
     q = shlex.quote(scratch)
     try:

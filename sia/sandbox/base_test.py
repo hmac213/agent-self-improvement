@@ -71,6 +71,32 @@ class SandboxHelpersTest(unittest.TestCase):
     def test_make_dirs(self):
         self.sb.make_dirs()
         self.assertEqual(self.sb.commands, ["mkdir -p /home /env /ws /rt"])
+        self.assertIsNone(self.sb.grading_sandbox())  # grade in place by default
+
+    def test_agent_user_owns_agent_dirs_only(self):
+        self.sb.agent_user = "agent"
+        self.sb.make_dirs()
+        self.assertEqual(self.sb.commands[1], "chown -R agent:agent /home /env /ws && chmod 700 /rt")
+        self.sb.upload_dir(self.root, "/home/harness")
+        self.assertEqual(self.sb.commands[-1], "chown -R agent:agent /home/harness")
+        self.sb.upload_dir(self.root, "/rt/grade-1/tests")
+        self.assertNotIn("chown", self.sb.commands[-1])  # runtime stays the supervisor's
+        self.sb.start_harness({}, "/rt/log")
+        inner = self.sb.commands[-1]
+        self.assertIn("setpriv --reuid=agent --regid=agent --init-groups env", inner)
+        self.assertLess(inner.index("setpriv"), inner.index("echo $? > /rt/exit_code"))  # the wrapper writes the exit code as root
+
+    def test_give_to_agent_without_user_is_a_no_op(self):
+        self.sb.give_to_agent("/ws/t")
+        self.assertEqual(self.sb.commands, [])
+
+    def test_pack_and_unpack_dir(self):
+        self.sb.files["/rt/download.tgz"] = b"tgz"
+        self.assertEqual(self.sb.pack_dir("/ws/t"), b"tgz")
+        self.sb.unpack_dir(b"tgz", "/ws/t")
+        self.assertEqual(self.sb.files["/rt/upload.tgz"], b"tgz")
+        self.sb.results = [(1, "")]
+        self.assertIsNone(self.sb.pack_dir("/nope"))
 
     def test_upload_dir(self):
         (self.root / "sub").mkdir()

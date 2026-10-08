@@ -277,6 +277,12 @@ class Supervisor:
         return code
 
     def run(self) -> dict:
+        sb, m = self.cfg.sandbox, self.cfg.model
+        if sb.kind == "local" and m.upstream != "mock" and not sb.allow_unisolated:
+            raise ValueError(
+                "the local sandbox can't keep the agent away from hidden tests, run logs or the network; "
+                "use sandbox.kind = 'docker' or 'daytona' for real models (or set sandbox.allow_unisolated = true)"
+            )
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.gens_dir.mkdir(exist_ok=True)
         (self.run_dir / "config.json").write_text(json.dumps(self.cfg.to_dict(), indent=2))
@@ -284,7 +290,7 @@ class Supervisor:
         self.db = TrajectoryDB(self.db_path)
         self.db.start_run(self.run_id, self.cfg.to_dict(), self.run_dir, str(self.seed_path), self.inherited, self.t_start)
         self.proxy = self._make_proxy()
-        self.sb: Sandbox = make_sandbox(self.cfg.sandbox, self.run_dir, self.run_id)
+        self.sb: Sandbox = make_sandbox(self.cfg.sandbox, self.run_dir, self.run_id, proxy_port=self.proxy.port)
         self._event("run_start", sandbox=self.cfg.sandbox.kind, seed=str(self.seed_path), inherited=self.inherited, affordance=self.cfg.experiment.affordance)
         try:
             self.sb.setup()

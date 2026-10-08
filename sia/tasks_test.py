@@ -33,6 +33,7 @@ def fake_sandbox():
     sb.paths = SandboxPaths(agent_home="/a", env_dir="/e", workspace="/w", runtime="/rt")
     sb.python = "py"
     sb.exec.return_value = (0, "pytest output")
+    sb.grading_sandbox.return_value = None
     return sb
 
 
@@ -82,6 +83,7 @@ class SuiteTest(unittest.TestCase):
         t = make_task(self.root, "with_starter", starter=True)
         tasks.prepare_workdir(sb, t, "/w/s")
         sb.upload_dir.assert_called_once_with(t.dir / "starter", "/w/s")
+        self.assertEqual(sb.give_to_agent.call_args_list, [mock.call("/w/plain"), mock.call("/w/s")])
 
     def test_count_tests(self):
         t = make_task(self.root, "t", tests="def test_a():\n    pass\n\n  def test_b(): pass\ndef helper(): pass\n")
@@ -117,6 +119,34 @@ class SuiteTest(unittest.TestCase):
         g = tasks.grade(sb, t, "/w/t")
         self.assertEqual((g.passed, g.total), (0, 2))
         self.assertIn("pytest output", g.error)
+
+    def test_grade_in_grading_sandbox(self):
+        t = make_task(self.root, "t", tests="def test_a(): pass\n")
+        sb, grader = fake_sandbox(), fake_sandbox()
+        sb.grading_sandbox.return_value = grader
+        sb.pack_dir.return_value = b"tgz"
+        grader.read_bytes.return_value = JUNIT
+        g = tasks.grade(sb, t, "/w/t")
+        self.assertEqual((g.passed, g.total), (1, 4))
+        sb.pack_dir.assert_called_once_with("/w/t")
+        grader.setup.assert_called_once()
+        grader.unpack_dir.assert_called_once_with(b"tgz", "/w/t")
+        # The hidden tests only ever reach the grader.
+        grader.upload_dir.assert_called_once()
+        sb.upload_dir.assert_not_called()
+        sb.exec.assert_not_called()
+        grader.teardown.assert_called_once()
+
+    def test_grading_sandbox_torn_down_on_error(self):
+        t = make_task(self.root, "t", tests="")
+        sb, grader = fake_sandbox(), fake_sandbox()
+        sb.grading_sandbox.return_value = grader
+        sb.pack_dir.return_value = None  # the agent deleted its working directory
+        grader.check.side_effect = RuntimeError("fail")
+        with self.assertRaises(RuntimeError):
+            tasks.grade(sb, t, "/w/t")
+        self.assertEqual(grader.check.call_args_list[0], mock.call("mkdir -p /w/t"))
+        grader.teardown.assert_called_once()
 
     def test_grade_cleans_up_on_error(self):
         t = make_task(self.root, "t", tests="")

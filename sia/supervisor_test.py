@@ -53,6 +53,7 @@ class SupervisorTestBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.cfg = Config()
+        self.cfg.sandbox.allow_unisolated = True  # the sandbox is a mock here
         self.sup = Supervisor(self.cfg, self.root / "run-x", verbose=False)
         self.sup.run_dir.mkdir()
         self.sup.gens_dir.mkdir()
@@ -426,7 +427,7 @@ class RunAndFinalizeTest(SupervisorTestBase):
                 mock.patch.object(sup, "_post_next_task") as post, \
                 mock.patch.object(sup, "_generation_loop") as loop:
             summary = sup.run()
-        mk.assert_called_once_with(self.cfg.sandbox, sup.run_dir, "fresh")
+        mk.assert_called_once_with(self.cfg.sandbox, sup.run_dir, "fresh", proxy_port=proxy.port)
         sb.setup.assert_called_once()
         self.assertEqual(sb.upload_dir.call_args[0][1:], ("/home/harness",))
         self.assertTrue((sup.run_dir / "seed_harness" / "main.py").exists())
@@ -437,6 +438,19 @@ class RunAndFinalizeTest(SupervisorTestBase):
         loop.assert_called_once()
         self.assertEqual(summary["run_id"], "fresh")
         self.assertTrue(proxy.stopped)
+
+    def test_local_sandbox_refuses_real_models(self):
+        self.cfg.sandbox.allow_unisolated = False
+        sup = Supervisor(self.cfg, self.root / "fresh", verbose=False)
+        with self.assertRaisesRegex(ValueError, "local sandbox"):
+            sup.run()
+        self.assertFalse(sup.run_dir.exists())
+        self.cfg.model.upstream = "mock"
+        sb = fake_sandbox()
+        sb.setup.side_effect = RuntimeError("past the guard")
+        with mock.patch.object(sup_mod, "make_sandbox", return_value=sb), mock.patch.object(sup, "_make_proxy", return_value=FakeProxy()):
+            with self.assertRaisesRegex(RuntimeError, "past the guard"):
+                sup.run()
 
     def test_run_records_error_and_finalizes(self):
         sb = fake_sandbox()
