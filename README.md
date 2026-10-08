@@ -48,6 +48,7 @@ The Python package is called `sia` ("self-improvement arena").
 - [Outputs](#outputs)
   - [Run directory](#run-directory)
   - [Evolve directory](#evolve-directory)
+  - [Trajectory database](#trajectory-database)
   - [Measured signals (`sia report`)](#measured-signals-sia-report)
 - [Testing](#testing)
 - [Status](#status)
@@ -78,6 +79,7 @@ python -m sia run experiments/mock_smoke.toml
 python -m sia run experiments/mock_smoke.toml --set model.mock_policy=break_harness   # exercises rollback
 python -m sia run experiments/mock_smoke.toml --set model.mock_policy=solve           # just solves tasks
 python -m sia report runs/<run_id>
+python -m sia db runs/<run_id>          # query the trajectory database
 ```
 
 ### Run real experiments
@@ -143,6 +145,7 @@ Defined in `sia/cli.py`.
 | `sia evolve CONFIG [--rounds 3] [--population 4] [--survivors 2] [--runs DIR] [--set ...]` | Population loop: each round runs `population` agents; the final harnesses of the top `survivors` by mean score become the seeds for the next round. |
 | `sia report RUN_DIR [--json]` | Self-improvement metrics for one run, as Markdown or JSON. |
 | `sia compare RUN_DIR ...` | One table row per run. |
+| `sia db [TARGET] [--run ID] [--show tasks\|generations\|llm_calls\|tool_calls\|events] [--sql QUERY] [--json]` | Query the [trajectory database](#trajectory-database), read-only. `TARGET` is a `trajectories.db` file, a runs directory or a run directory (default `runs/`). With no options it lists runs; `--run` shows one run's rows; `--sql` runs an arbitrary query. |
 
 `--runs` defaults to `runs/` at the repository root.
 
@@ -153,7 +156,7 @@ agent-self-improvement/
 ├── pyproject.toml              package "sia", console script `sia`, extras [dev] and [daytona]
 ├── sia/                        host side: everything the agent can't modify
 │   ├── __main__.py             `python -m sia`
-│   ├── cli.py                  run / evolve / report / compare commands
+│   ├── cli.py                  run / evolve / report / compare / db commands
 │   ├── config.py               experiment config dataclasses, TOML loading, --set overrides
 │   ├── supervisor.py           runs one agent through a task schedule (the core loop)
 │   ├── proxy.py                LLM proxy: auth, budgets, model pinning, logging, translation
@@ -170,6 +173,7 @@ agent-self-improvement/
 │   ├── tasks.py                task suites, scheduling, hidden-test grading
 │   ├── prompts.py              system prompt per affordance level
 │   ├── archive.py              harness tree hashing and diffs
+│   ├── trajectories.py         SQLite trajectory store (source of truth for runs)
 │   ├── report.py               run analysis: signals, generations, grades
 │   └── mock_llm.py             scripted model for key-free testing
 ├── seed_harness/               the agent's starting harness (copied into the sandbox, mutable)
@@ -186,7 +190,7 @@ agent-self-improvement/
 │   └── smoke/                  3 trivial tasks the mock model can solve
 ├── sandbox_image/Dockerfile    image for docker/daytona sandboxes
 ├── experiments/                ready-made experiment configs (TOML)
-└── tests/                      pytest suite
+└── tests/                      integration tests (pytest); unit tests sit next to each module as *_test.py
 ```
 
 ## How it fits together
@@ -357,7 +361,10 @@ run](#lifecycle-of-a-run)). Key methods:
 - `_harness_env()` builds the harness's environment.
 - `_finalize()` collects `final/`, writes `summary.json`, cleans up.
 
-Every step is appended to `events.jsonl` via `_event()`.
+Every step goes through `_event()`, which appends it to `events.jsonl` and
+records it in the [trajectory database](#trajectory-database). When it
+installs the configured seed, `_render_seed()` leaves out `*_test.py` files,
+so the seed's unit tests never reach the agent.
 
 #### `proxy.py`
 `LLMProxy` is a threaded HTTP server on the host (`start()`, `stop()`). It:
@@ -376,7 +383,9 @@ Every step is appended to `events.jsonl` via `_event()`.
   Claude models or `model.price_per_mtok`; unknown models are priced
   conservatively at $10/$50 per million tokens) in `Stats`;
 - appends every call to `llm_calls.jsonl`, tagged with the current
-  `generation` and `task_id` (from `proxy.context`).
+  `generation` and `task_id` (from `proxy.context`), and hands the same
+  record to an optional `recorder` callback, which the supervisor points at
+  the trajectory database.
 
 #### `tasks.py`
 `Task` and `Grade` dataclasses; `load_suite(path)`, `schedule(tasks, order,
@@ -394,9 +403,20 @@ tool.
 new) -> (unified diff, stats)`, where stats lists added, removed and modified
 files and line counts. Ignores `__pycache__`, `.pyc` and temp files.
 
+#### `trajectories.py`
+`TrajectoryDB(path, readonly=False)` is the SQLite store described under
+[Trajectory database](#trajectory-database). Writers: `start_run()`,
+`record_event()`, `record_llm_call()` (or `recorder(run_id)` for the proxy),
+`finish_run()`. Readers: `runs()`, `run()`, `events()`, `generations()`,
+`tasks()`, `llm_calls()`, `tool_calls()`, and `query(sql)`.
+`import_run_dir()` loads an older run from its JSONL logs;
+`open_for_run(run_dir)` and `resolve_db_path(target)` find the right file.
+
 #### `report.py`
-`analyze(run_dir) -> dict` reads `events.jsonl`, `llm_calls.jsonl`,
-`config.json`, `summary.json` and `final/agent_home/`, and computes the
+`analyze(run_dir) -> dict` queries the run's rows in the trajectory database
+(runs recorded before the database existed are imported from their JSONL
+logs into an in-memory one; a directory with neither raises
+`FileNotFoundError`), reads `final/agent_home/`, and computes the
 [signals](#measured-signals-sia-report). `render()` formats one run as
 Markdown; `compare(run_dirs)` makes a one-row-per-run table.
 
@@ -625,6 +645,7 @@ Experiments are TOML files with five sections; every key has a default
 | `affordance` | `0` | 0-3, see above |
 | `system_prompt` | `null` | replaces the rendered system prompt entirely |
 | `replicates` | `1` | default for `sia run --replicates` |
+| `trajectory_db` | `null` | path of the trajectory database; default `<runs root>/trajectories.db`, relative paths resolve against the runs root |
 
 **`[model]`**
 
@@ -700,7 +721,7 @@ final/agent_home/           the agent's home at the end (harness, memory files, 
 final/workspace/            task working directories
 final/harness_vs_seed.patch
 summary.json                stop_reason, tasks_graded, mean_score, scores, llm_calls, cost_usd,
-                            models_requested, seconds, harness_vs_seed
+                            models_requested, seconds, harness_vs_seed, trajectory_db
 sandbox/                    local sandbox only: the sandbox's own files
 ```
 
@@ -718,6 +739,35 @@ Event types in `events.jsonl`: `run_start`, `installing_deps`,
 directory per agent per round (`<name>-g<round>-<stamp>-r<i>`), `pool/` with
 the surviving harnesses (`g<round>-rank<k>/`), and `lineage.json` with each
 round's scores and survivors.
+
+### Trajectory database
+
+`sia/trajectories.py` keeps one SQLite file, by default
+`<runs root>/trajectories.db` (the parent of the run directories), shared by
+every replicate and every evolve round. It is the queryable source of truth:
+`sia report` and `sia db` read from it. The JSONL files in each run directory
+are still written alongside it. Tables, all keyed by `run_id` (the run
+directory name):
+
+| table | one row per | contents |
+|---|---|---|
+| `runs` | run | config, experiment, affordance, model, upstream, sandbox, seed, start/end time, stop reason, tasks graded, mean score, LLM calls, cost, summary |
+| `events` | supervisor event | type and JSON payload, in order |
+| `generations` | harness launch | hash, whether it changed, `changed_by` (`agent`/`rollback`), diff, exit code, seconds, LLM calls |
+| `tasks` | task attempt | prompt, posted/graded time, reason, passed/total/score, LLM calls, seconds, failures, error |
+| `llm_calls` | model call seen by the proxy | generation, task, provider, requested/actual model, status, stop reason, tokens, cost, latency, full request and response JSON |
+| `tool_calls` | tool call the model made | name and input, joined with the result the harness sent back on the next call |
+
+The supervisor thread and the proxy's request threads write concurrently, and
+parallel runs may share the file, so the database uses WAL mode, a 30-second
+busy timeout and short `BEGIN IMMEDIATE` transactions. Re-running a run id
+replaces its rows. Example:
+
+```bash
+python -m sia db                                     # list runs
+python -m sia db --run <run_id> --show llm_calls
+python -m sia db --sql "SELECT affordance, AVG(mean_score) FROM runs GROUP BY affordance"
+```
 
 ### Measured signals (`sia report`)
 
@@ -738,11 +788,22 @@ From weakest to strongest:
 ## Testing
 
 ```bash
-pytest
+pytest                                   # everything: unit + integration tests
+python -m unittest discover -p "*_test.py"   # unit tests only, stdlib runner
 ```
 
-`pyproject.toml` sets `testpaths = ["tests"]`. Everything runs locally
-without API keys:
+Everything runs offline, without API keys. `pyproject.toml` points pytest at
+`sia`, `seed_harness` and `tests`, collecting both `*_test.py` and
+`test_*.py`.
+
+**Unit tests** (stdlib `unittest`) sit next to the code: every non-trivial
+module `folder/file.py` has `folder/file_test.py` (packages with logic in
+`__init__.py` use `init_test.py`). They cover each module's core behaviour
+and control flow with network, Docker, Daytona and subprocess calls mocked.
+The supervisor leaves `*_test.py` out when it installs the seed harness, so
+the agent never sees the harness's tests.
+
+**Integration tests** live in `tests/`:
 
 | file | covers |
 |---|---|
