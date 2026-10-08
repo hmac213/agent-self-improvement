@@ -73,7 +73,10 @@ class Supervisor:
     # --- setup ------------------------------------------------------------------
     def _render_seed(self, dest: Path) -> None:
         """Copy the seed harness and specialise it for this experiment."""
-        shutil.copytree(self.seed_path, dest, ignore=shutil.ignore_patterns("__pycache__"))
+        # The configured seed's unit tests (*_test.py) stay on the host, out of the
+        # agent's harness. An inherited harness is copied verbatim.
+        ignore = ("__pycache__",) if self.inherited else ("__pycache__", "*_test.py")
+        shutil.copytree(self.seed_path, dest, ignore=shutil.ignore_patterns(*ignore))
         if self.inherited:
             return
         exp, model = self.cfg.experiment, self.cfg.model
