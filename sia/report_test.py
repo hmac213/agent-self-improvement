@@ -72,6 +72,11 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(report.analyze(self.run)["restarts"]["other"], 2)
 
     def test_analyze_empty_run(self):
+        with self.assertRaises(FileNotFoundError):
+            report.analyze(self.run)
+
+    def test_analyze_run_without_activity(self):
+        jsonl(self.run / "events.jsonl", [])
         a = report.analyze(self.run)
         self.assertEqual(a["generations"], [])
         self.assertIsNone(a["signals"]["looked_at_harness_call"])

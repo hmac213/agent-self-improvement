@@ -10,8 +10,9 @@ Every model call goes through this proxy instead, which:
     enters the sandbox),
   * enforces the run's call and cost budget,
   * optionally pins the model,
-  * logs every request and response to llm_calls.jsonl — the ground-truth
-    trace for analysis.
+  * logs every request and response to llm_calls.jsonl and, through
+    `recorder`, to the run's trajectory database (trajectories.py) — the
+    ground-truth trace for analysis.
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ class LLMProxy:
         host: str = "0.0.0.0",
         port: int = 0,
         prices: tuple[float, float] | None = None,
+        recorder: Callable[[dict], None] | None = None,
     ):
         self.log_path = log_path
         self.budget = budget
@@ -87,6 +89,7 @@ class LLMProxy:
         self.upstream_url = self.provider.base_url
         self.api_key = api_key
         self.prices = prices
+        self.recorder = recorder  # called with each log record, e.g. TrajectoryDB.recorder(run_id)
         self.mock = mock
         self.force_model = force_model
         self.token = "sia-" + secrets.token_urlsafe(24)
@@ -131,6 +134,8 @@ class LLMProxy:
     def _log(self, record: dict) -> None:
         with self._lock, open(self.log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
+        if self.recorder is not None:
+            self.recorder(record)
 
     def _handler_class(self):
         proxy = self

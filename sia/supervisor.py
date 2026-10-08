@@ -25,6 +25,7 @@ from .config import Config
 from .providers import ALL_KEY_ENV, API_KEY_ENV
 from .proxy import Budget, LLMProxy
 from .sandbox import Sandbox, make_sandbox
+from .trajectories import TrajectoryDB, default_path
 
 POLL_SECONDS = 1.0
 
@@ -50,12 +51,16 @@ class Supervisor:
         self.next_index = 0
         self.last_call_at = time.time()
         self.last_call_count = 0
+        self.db_path = default_path(run_dir.parent, cfg.experiment.trajectory_db)
+        self.db: TrajectoryDB | None = None
 
     # --- bookkeeping ------------------------------------------------------------
     def _event(self, type: str, **data) -> None:
         rec = {"ts": time.time(), "type": type, **data}
         with open(self.events_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
+        if self.db is not None:
+            self.db.record_event(self.run_id, rec)
         if self.verbose:
             brief = " ".join(f"{k}={v}" for k, v in data.items() if not isinstance(v, (dict, list)) and k != "prompt")
             print(f"[{self.run_id}] {type} {brief}", flush=True)
@@ -113,6 +118,7 @@ class Supervisor:
             force_model=m.name if m.model_policy == "force" else None,
             port=self.cfg.sandbox.proxy_port,
             prices=tuple(m.price_per_mtok) if m.price_per_mtok else None,
+            recorder=self.db.recorder(self.run_id) if self.db else None,
         ).start()
 
     # --- tasks ------------------------------------------------------------------
@@ -275,6 +281,8 @@ class Supervisor:
         self.gens_dir.mkdir(exist_ok=True)
         (self.run_dir / "config.json").write_text(json.dumps(self.cfg.to_dict(), indent=2))
         self.t_start = time.time()
+        self.db = TrajectoryDB(self.db_path)
+        self.db.start_run(self.run_id, self.cfg.to_dict(), self.run_dir, str(self.seed_path), self.inherited, self.t_start)
         self.proxy = self._make_proxy()
         self.sb: Sandbox = make_sandbox(self.cfg.sandbox, self.run_dir, self.run_id)
         self._event("run_start", sandbox=self.cfg.sandbox.kind, seed=str(self.seed_path), inherited=self.inherited, affordance=self.cfg.experiment.affordance)
@@ -367,6 +375,11 @@ class Supervisor:
             "models_requested": stats.models_requested if stats else {},
             "seconds": round(time.time() - self.t_start, 1) if hasattr(self, "t_start") else 0,
         })
+        summary["trajectory_db"] = str(self.db_path)
         (self.run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
         self._event("run_end", **{k: v for k, v in summary.items() if not isinstance(v, dict)})
+        if self.db is not None:
+            self.db.finish_run(self.run_id, summary)
+            self.db.close()
+            self.db = None
         return summary
