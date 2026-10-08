@@ -284,7 +284,7 @@ class Supervisor:
         self.db = TrajectoryDB(self.db_path)
         self.db.start_run(self.run_id, self.cfg.to_dict(), self.run_dir, str(self.seed_path), self.inherited, self.t_start)
         self.proxy = self._make_proxy()
-        self.sb: Sandbox = make_sandbox(self.cfg.sandbox, self.run_dir, self.run_id)
+        self.sb: Sandbox = make_sandbox(self.cfg.sandbox, self.run_dir, self.run_id, proxy_port=self.proxy.port)
         self._event("run_start", sandbox=self.cfg.sandbox.kind, seed=str(self.seed_path), inherited=self.inherited, affordance=self.cfg.experiment.affordance)
         try:
             self.sb.setup()

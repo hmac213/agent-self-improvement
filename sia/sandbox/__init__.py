@@ -6,7 +6,8 @@ from ..config import SandboxCfg
 from .base import Sandbox, SandboxPaths
 
 
-def make_sandbox(cfg: SandboxCfg, run_dir: Path, run_id: str) -> Sandbox:
+def make_sandbox(cfg: SandboxCfg, run_dir: Path, run_id: str, proxy_port: int | None = None) -> Sandbox:
+    """`proxy_port` is the host port of the run's LLM proxy (docker's proxy_only network forwards to it)."""
     if cfg.kind == "local":
         from .local import LocalSandbox
 
@@ -14,7 +15,7 @@ def make_sandbox(cfg: SandboxCfg, run_dir: Path, run_id: str) -> Sandbox:
     if cfg.kind == "docker":
         from .docker import DockerSandbox
 
-        return DockerSandbox(cfg.image, name=f"sia-{run_id}")
+        return DockerSandbox(cfg.image, name=f"sia-{run_id}", network=cfg.network, proxy_port=proxy_port)
     if cfg.kind == "daytona":
         from .daytona import DaytonaSandbox
 

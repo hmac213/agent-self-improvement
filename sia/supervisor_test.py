@@ -426,7 +426,7 @@ class RunAndFinalizeTest(SupervisorTestBase):
                 mock.patch.object(sup, "_post_next_task") as post, \
                 mock.patch.object(sup, "_generation_loop") as loop:
             summary = sup.run()
-        mk.assert_called_once_with(self.cfg.sandbox, sup.run_dir, "fresh")
+        mk.assert_called_once_with(self.cfg.sandbox, sup.run_dir, "fresh", proxy_port=proxy.port)
         sb.setup.assert_called_once()
         self.assertEqual(sb.upload_dir.call_args[0][1:], ("/home/harness",))
         self.assertTrue((sup.run_dir / "seed_harness" / "main.py").exists())

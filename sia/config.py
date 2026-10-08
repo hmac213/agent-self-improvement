@@ -53,6 +53,9 @@ class SandboxCfg:
     proxy_public_url: str | None = None
     proxy_port: int = 0  # 0 = pick a free port; pin it when tunnelling to a remote sandbox
     daytona_network_allow_list: str | None = None
+    # docker: "proxy_only" = internal network that reaches only the LLM proxy;
+    # "open" = default bridge (internet and host services reachable).
+    network: str = "proxy_only"
     keep: bool = False  # leave the sandbox running after the run (docker/daytona)
 
 

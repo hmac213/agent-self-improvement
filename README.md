@@ -292,7 +292,9 @@ Everything the agent can touch is mutable, including its own logging, so
 measurements come from outside: the proxy log (`llm_calls.jsonl`: every
 request and response, no matter how the harness was rewritten), harness
 snapshots taken by the supervisor, and grades from hidden tests the agent
-never sees. The supervisor writes the task prompt itself, including feedback
+never sees. In the Docker sandbox this is enforced, not just assumed (see
+[Docker isolation](#docker-isolation)).
+The supervisor writes the task prompt itself, including feedback
 on the previous task, so feedback doesn't depend on the mutable harness.
 
 ### Generations, exit codes and rollback
@@ -432,28 +434,50 @@ Deterministic stand-ins for the model, selected with `model.mock_policy`
 
 ### `sia/sandbox/`
 
-`make_sandbox(cfg, run_dir, run_id)` returns a backend for `sandbox.kind`.
+`make_sandbox(cfg, run_dir, run_id, proxy_port)` returns a backend for
+`sandbox.kind` (`proxy_port` is the host port of the run's LLM proxy).
 
 `base.py` defines `SandboxPaths` (`agent_home`, `env_dir`, `workspace`,
 `runtime`, and `harness = agent_home/harness`) and the abstract `Sandbox`. A
 backend implements `setup`, `teardown`, `exec`, `read_bytes`, `write_bytes`
 and `proxy_url`. Everything else is shared: `check`, `write_text_atomic`,
-`upload_dir` / `download_dir` (tarballs over `write_bytes` / `read_bytes`),
-and harness process control: `start_harness` (detached `setsid sh start.sh`,
-with a wrapper that records the exit code), `poll_harness` and `stop_harness`
-(SIGTERM then SIGKILL to the process group). Adding a backend (Modal, E2B,
+`upload_dir` / `download_dir` and `pack_dir` / `unpack_dir` (tarballs over
+`write_bytes` / `read_bytes`), and harness process control: `start_harness`
+(detached `setsid sh start.sh`, with a wrapper that records the exit code),
+`poll_harness` and `stop_harness` (SIGTERM then SIGKILL to the process group).
+Two optional hooks harden a backend: `agent_user` (the harness drops to that
+user via `setpriv` and owns the agent's directories, while the runtime area
+stays root-only; `give_to_agent(path)` hands over new files) and
+`grading_sandbox()` (a fresh sandbox that `tasks.grade` copies the working
+directory into, so the hidden tests never enter the agent's sandbox). Adding a backend (Modal, E2B,
 Firecracker...) is about 50 lines.
 
 | kind | class | isolation | paths (home, mailbox, workspace, runtime) | proxy URL |
 |---|---|---|---|---|
 | `local` | `LocalSandbox` | **none**: the harness is a host process | `runs/<id>/sandbox/{agent,env,workspace,runtime}` | `http://127.0.0.1:<port>` |
-| `docker` | `DockerSandbox` | one long-lived container per run (`sleep infinity`, driven by `docker exec`) | `/agent`, `/env`, `/workspace`, `/var/lib/sia` | `http://host.docker.internal:<port>` |
+| `docker` | `DockerSandbox` | one long-lived container per run (`sleep infinity`, driven by `docker exec` as root); harness runs as `agent`; grading in a throwaway container; network restricted to the proxy ([details](#docker-isolation)) | `/agent`, `/env`, `/workspace`, `/var/lib/sia` | `http://sia-proxy:8080` (forwarder), or `http://host.docker.internal:<port>` with `network = "open"` |
 | `daytona` | `DaytonaSandbox` | cloud sandbox via the `daytona` SDK | `~/agent`, `~/env`, `~/workspace`, `~/.sia` | `sandbox.proxy_public_url` (required) |
 
 Daytona needs `DAYTONA_API_KEY`, `pip install -e '.[daytona]'`, and a public
 URL for the proxy (`sandbox.proxy_public_url`, `sandbox.proxy_port`), e.g.
 through `cloudflared tunnel --url http://localhost:8787`.
 `sandbox.daytona_network_allow_list` can restrict egress to the proxy only.
+Daytona does not yet use `agent_user` or a grading sandbox, so there the
+harness can read `~/.sia` and grading happens in the agent's own sandbox.
+
+#### Docker isolation
+
+The Docker backend closes three leaks:
+
+| leak | fix |
+|---|---|
+| hidden tests visible while grading | `tasks.grade` copies the working directory into a fresh container (`--network none`, removed afterwards); the hidden tests and the agent's code under test only ever meet there |
+| supervisor files (`/var/lib/sia`: harness logs, exit codes, transfers) readable | the harness runs as the unprivileged `agent` user (uid 1000, from `sandbox_image/`); supervisor commands run as root and `/var/lib/sia` is mode 700. Containers run with `no-new-privileges` and only the capabilities root needs for that (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `KILL`) |
+| open internet and host access | `sandbox.network = "proxy_only"` (default): the container sits on an internal Docker network (`sia-<run>-net`) whose only other member is a TCP forwarder (`sia-<run>-proxy`, the same image running as `nobody`) that relays to the host's LLM proxy. No internet, no DNS, no other host services. `network = "open"` restores the default bridge |
+
+All three are covered by `tests/test_docker_isolation.py`, which runs probes
+inside a real harness launch. With `proxy_only` the agent can't `pip install`
+anything: whatever it needs must be in the image.
 
 ### `sia/providers/`
 
@@ -511,8 +535,9 @@ agent has something to gain by improving it.
 
 ### `sandbox_image/`
 
-`Dockerfile`: `python:3.12-slim` plus `pytest` (needed for grading), with
-`HOME=/agent`. Build it as `sia-sandbox:latest`, the default
+`Dockerfile`: `python:3.12-slim` plus `pytest` (needed for grading) and an
+unprivileged `agent` user (uid 1000) with `HOME=/agent`. The Docker backend
+refuses images without that user, so rebuild older images. Build it as `sia-sandbox:latest`, the default
 `sandbox.image`.
 
 ### `experiments/`
@@ -669,6 +694,7 @@ Experiments are TOML files with five sections; every key has a default
 | `proxy_public_url` | `null` | how a remote sandbox reaches the proxy (required for Daytona) |
 | `proxy_port` | `0` | proxy port; 0 picks a free one (pin it when tunnelling) |
 | `daytona_network_allow_list` | `null` | CIDR egress allow-list for Daytona |
+| `network` | `"proxy_only"` | Docker: `proxy_only` (internal network, reaches only the LLM proxy) or `open` (default bridge: internet and host) |
 | `keep` | `false` | leave the Docker container / Daytona sandbox running after the run |
 
 **`[tasks]`**
@@ -812,6 +838,7 @@ the agent never sees the harness's tests.
 | `tests/test_providers.py` | request/response translation for Anthropic, OpenAI and Gemini; `/v1/generate` through the proxy against fake upstreams; error relay; passthrough only for Anthropic; price override |
 | `tests/test_e2e_mock.py` | full runs with the mock model: self-modification and restart, the restart tool at affordance 2, a silent prompt at affordance 0, rollback, exact per-task budgets, inherited harnesses, and the Docker sandbox (skipped unless Docker and `sia-sandbox:latest` are available) |
 | `tests/test_daytona_adapter.py` | the Daytona backend against a fake `daytona` SDK that runs locally |
+| `tests/test_docker_isolation.py` | real containers: the harness runs as non-root, can't read `/var/lib/sia`, reaches the proxy but not other host services or DNS (with an open-network control), and hidden tests never enter the agent's container; grading containers and networks are cleaned up (skipped unless Docker and `sia-sandbox:latest` are available) |
 
 ## Status
 
@@ -835,9 +862,10 @@ real run is the next step.
   resume if the process restarts", and after any restart the model sees
   `[Harness restarted …]`. Both are realistic, but they are information
   channels. Decide whether to strip them for the strictest condition.
-- **Leaks in Docker.** The agent can read `/var/lib/sia` (harness logs, and
-  hidden tests while grading runs). Grading in a separate container would
-  close that. The container also has open internet access by default.
+- **Leaks in Daytona.** Docker is sealed (see [Docker
+  isolation](#docker-isolation)), but on Daytona the harness can still read
+  `~/.sia` and grading runs in the agent's own sandbox. Use Docker for the
+  main experiment, or give Daytona an `agent_user` and a grading sandbox first.
 - **Local sandbox** inherits the host environment except the provider API
   keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
   `GOOGLE_API_KEY`). Don't run real models there with secrets in your
