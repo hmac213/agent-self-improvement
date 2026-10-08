@@ -22,6 +22,7 @@ from pathlib import Path
 from . import archive, mock_llm, prompts
 from . import tasks as tasks_mod
 from .config import Config
+from .providers import ALL_KEY_ENV, API_KEY_ENV
 from .proxy import Budget, LLMProxy
 from .sandbox import Sandbox, make_sandbox
 
@@ -81,27 +82,34 @@ class Supervisor:
             (dest / "tools" / "restart.py").unlink(missing_ok=True)
 
     def _ensure_deps(self) -> None:
-        """The seed harness needs the anthropic SDK and grading needs pytest."""
+        """Grading needs pytest. The seed harness needs only the standard library."""
         py = self.sb.python
-        if self.sb.exec(f"{py} -c 'import anthropic, pytest'")[0] != 0:
+        if self.sb.exec(f"{py} -c 'import pytest'")[0] != 0:
             self._event("installing_deps")
-            self.sb.check(f"{py} -m pip install -q anthropic pytest", timeout=600)
+            self.sb.check(f"{py} -m pip install -q pytest", timeout=600)
 
     def _make_proxy(self) -> LLMProxy:
         m, lim = self.cfg.model, self.cfg.limits
-        mock = None
+        mock, provider, api_key = None, m.upstream, None
         if m.upstream == "mock":
-            mock = mock_llm.POLICIES[m.mock_policy]
-        elif not os.environ.get("ANTHROPIC_API_KEY"):
-            raise RuntimeError("ANTHROPIC_API_KEY must be set on the host (it never enters the sandbox)")
+            mock, provider = mock_llm.POLICIES[m.mock_policy], "anthropic"
+        else:
+            if m.upstream not in API_KEY_ENV:
+                raise ValueError(f"unknown model.upstream {m.upstream!r}; known: {sorted(API_KEY_ENV)} or 'mock'")
+            names = API_KEY_ENV[m.upstream]
+            api_key = next((os.environ[n] for n in names if os.environ.get(n)), None)
+            if not api_key:
+                raise RuntimeError(f"{' or '.join(names)} must be set on the host (it never enters the sandbox)")
         return LLMProxy(
             log_path=self.run_dir / "llm_calls.jsonl",
             budget=Budget(lim.total_llm_calls, lim.total_cost_usd),
+            provider=provider,
             upstream_url=m.upstream_url,
-            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            api_key=api_key,
             mock=mock,
             force_model=m.name if m.model_policy == "force" else None,
             port=self.cfg.sandbox.proxy_port,
+            prices=tuple(m.price_per_mtok) if m.price_per_mtok else None,
         ).start()
 
     # --- tasks ------------------------------------------------------------------
@@ -222,6 +230,12 @@ class Supervisor:
             "SIA_WORKSPACE": p.workspace,
             "SIA_GENERATION": str(gen),
             "SIA_PYTHON": self.sb.python,
+            "SIA_LLM_URL": self.sb.proxy_url(self.proxy.port),
+            "SIA_LLM_TOKEN": self.proxy.token,
+            # Blank host keys so they can't leak into a local sandbox.
+            **{k: "" for k in ALL_KEY_ENV},
+            # For harnesses that call the Anthropic API directly (served only
+            # when the provider is Anthropic).
             "ANTHROPIC_BASE_URL": self.sb.proxy_url(self.proxy.port),
             "ANTHROPIC_API_KEY": self.proxy.token,
         }
