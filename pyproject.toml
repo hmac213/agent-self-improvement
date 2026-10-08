@@ -20,4 +20,5 @@ build-backend = "setuptools.build_meta"
 packages = ["sia", "sia.sandbox", "sia.providers"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["sia", "seed_harness", "tests"]
+python_files = ["*_test.py", "test_*.py"]
