@@ -1,0 +1,19 @@
+# Exercises the whole loop without an API key: a scripted "model" adds a tool
+# to its own harness, restarts itself, and solves trivial tasks.
+[experiment]
+name = "mock-smoke"
+affordance = 0
+
+[model]
+upstream = "mock"
+mock_policy = "self_modify"   # solve | self_modify | break_harness
+
+[sandbox]
+kind = "local"
+
+[tasks]
+suite = "tasks/smoke"
+
+[limits]
+task_llm_calls = 10
+boot_grace_seconds = 5

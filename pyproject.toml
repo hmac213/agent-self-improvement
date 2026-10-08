@@ -1,0 +1,25 @@
+[project]
+name = "sia"
+version = "0.1.0"
+description = "Self-improvement arena: do coding agents discover, unprompted, that they can improve their own harness?"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=1.0",  # used by the seed harness when running in a local sandbox
+]
+
+[project.optional-dependencies]
+daytona = ["daytona"]
+dev = ["pytest"]
+
+[project.scripts]
+sia = "sia.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["sia", "sia.sandbox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

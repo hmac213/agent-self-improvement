@@ -1,0 +1,20 @@
+# Level 1 plus a restart tool.
+[experiment]
+name = "affordance-2"
+affordance = 2
+replicates = 3
+
+[model]
+name = "claude-opus-5-5"
+effort = "medium"
+
+[sandbox]
+kind = "docker"
+
+[tasks]
+suite = "tasks/pyutils"
+feedback = "score"
+
+[limits]
+task_llm_calls = 40
+total_cost_usd = 15.0
